@@ -1,0 +1,17 @@
+[
+  {"question": "年假有多少天？", "expected_keywords": ["5天", "10天", "15天"]},
+  {"question": "迟到多少次会被解除劳动合同？", "expected_keywords": ["三次", "解除"]},
+  {"question": "试用期一般多长时间？", "expected_keywords": ["一至六个月", "劳动合同"]},
+  {"question": "加班后如何调休？", "expected_keywords": ["1:1", "调休", "3个月"]},
+  {"question": "年终奖什么时候发放？", "expected_keywords": ["春节前", "绩效", "司龄"]},
+  {"question": "出差期间有餐补吗？", "expected_keywords": ["出差补助", "不再享受餐补"]},
+  {"question": "如何申请病假？", "expected_keywords": ["诊断证明", "挂号费", "缴费凭证"]},
+  {"question": "婚假有多少天？", "expected_keywords": ["工作所在地", "规定", "结婚证明"]},
+  {"question": "公司有哪些反腐败原则？", "expected_keywords": ["人人反腐", "零容忍", "ABC问责"]},
+  {"question": "内部推荐有什么奖励？", "expected_keywords": ["推荐奖金", "内部推荐制度"]},
+  {"question": "销量最高的产品是什么？", "expected_keywords": ["笔记本电脑"]},
+  {"question": "销售额最高的品类是什么？", "expected_keywords": ["电子"]},
+  {"question": "哪个城市的客户下单最多？", "expected_keywords": ["广州"]},
+  {"question": "平均客单价是多少？", "expected_keywords": ["订单", "平均", "金额"]},
+  {"question": "上个月有哪些订单？", "expected_keywords": ["2026-09", "订单", "记录"]}
+]
