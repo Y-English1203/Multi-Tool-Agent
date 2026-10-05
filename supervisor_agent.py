@@ -16,56 +16,88 @@ class SupervisorState(TypedDict):
     question: str
     user_id: str
     trace_id: str
-    next_tool: str       # rag / sql / ticket
+    next_tool: str
     answer: str
     tool_used: str
-    ticket_action: str   # create / query / escalate
-    history: list
+    error: str
+    retry_count: int
+    max_retries: int
+    retriever: object   # 新增：传入 retriever  # 新增：最大重试次数
 
 # ============ Supervisor 节点 ============
 def supervisor(state: SupervisorState) -> SupervisorState:
-    """主管：根据用户问题决定调用哪个工具"""
+    # 如果有错误且未超过重试上限，重新路由
+    if state.get("error") and state.get("retry_count", 0) < state.get("max_retries", 2):
+        print(f"[Trace: {state['trace_id']}] ⚠️ 工具执行失败，准备重试...")
+        state["retry_count"] += 1
+        state["error"] = ""
+        # 重新判断工具
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": f"用户问题：{state['question']}\n只回答：rag / sql / ticket"}],
+            temperature=0
+        )
+        tool = response.choices[0].message.content.strip().lower()
+        state["next_tool"] = tool if tool in ["rag", "sql", "ticket"] else "rag"
+        return state
+
+    # 正常判断
     response = client.chat.completions.create(
         model="deepseek-chat",
-        messages=[{
-            "role": "user",
-            "content": f"""你是一个任务调度主管。请判断用户的问题应该调用哪个工具，只回答一个词：
-- rag：关于文档内容、知识库、资料查询
-- sql：关于数据统计、销量、订单、金额
-- ticket：关于创建工单、投诉、退款、查询工单状态
-
-用户问题：{state['question']}
-只回答：rag / sql / ticket"""
-        }],
+        messages=[{"role": "user", "content": f"判断问题类型，只回答：rag / sql / ticket。\n\n用户问题：{state['question']}"}],
         temperature=0
     )
     tool = response.choices[0].message.content.strip().lower()
     state["next_tool"] = tool if tool in ["rag", "sql", "ticket"] else "rag"
     return state
-
 # ============ 工具节点 ============
 def rag_node(state: SupervisorState) -> SupervisorState:
     print(f"[Trace: {state['trace_id']}] 📚 调用 RAG 检索")
-    # 注意：HybridRetriever 需要在外部初始化后传入，这里简化处理，实际可以传入
-    # 为了简化，这里直接用 text2sql 的 client 调一次 LLM 模拟
-    # 实际上你应该复用 server.py 里的 retriever
-    state["tool_used"] = "rag"
-    state["answer"] = "（RAG 检索结果，请接入 retriever）"
+    try:
+        # 1. 从 state 里取出 retriever，做混合检索
+        docs = state["retriever"].retrieve(state["question"], top_k=5)
+        context = "\n\n".join(docs)
+
+        # 2. 把检索结果拼成上下文，发给大模型生成回答
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": f"请严格根据以下文档内容回答问题，末尾标注引用页码。\n\n文档内容：\n{context}"},
+                {"role": "user", "content": state["question"]}
+            ]
+        )
+
+        state["answer"] = response.choices[0].message.content
+        state["tool_used"] = "rag"
+        state["error"] = ""
+    except Exception as e:
+        state["error"] = str(e)
+        state["answer"] = "文档检索暂时不可用，请稍后再试。"
     return state
 
 def sql_node(state: SupervisorState) -> SupervisorState:
     print(f"[Trace: {state['trace_id']}] 📊 调用 Text-to-SQL")
-    state["tool_used"] = "sql"
-    state["answer"] = text2sql(state["question"])
+    try:
+        state["answer"] = text2sql(state["question"])
+        state["tool_used"] = "sql"
+        state["error"] = ""
+    except Exception as e:
+        state["error"] = str(e)
+        state["answer"] = "数据查询暂时不可用，请稍后再试。"
     return state
 
 def ticket_node(state: SupervisorState) -> SupervisorState:
     print(f"[Trace: {state['trace_id']}] 🎫 调用工单工具")
-    state["tool_used"] = "ticket"
-    if "查询" in state["question"] or "状态" in state["question"]:
-        state["answer"] = list_user_tickets(state["user_id"])
-    else:
-        state["answer"] = create_ticket(state["user_id"], state["question"], priority="中")
+    try:
+        if "查询" in state["question"] or "状态" in state["question"]:
+            state["answer"] = list_user_tickets(state["user_id"])
+        else:
+            state["answer"] = create_ticket(state["user_id"], state["question"], priority="中")
+        state["tool_used"] = "ticket"
+        state["error"] = ""
+    except Exception as e:
+        state["error"] = str(e)
+        state["answer"] = "工单服务暂时不可用，请稍后再试。"
     return state
 
 # ============ 路由 ============

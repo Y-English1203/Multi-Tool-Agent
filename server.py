@@ -13,6 +13,7 @@ from langchain_chroma import Chroma
 from supervisor_agent import supervisor_agent, SupervisorState
 import uuid
 
+
 # 1. 环境变量与初始化
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -150,15 +151,17 @@ def ask_auto(q: Question):
 def ask_supervisor(q: Question):
     """Supervisor 多 Agent 协作接口"""
     initial_state: SupervisorState = {
-        "question": q.question,
-        "user_id": getattr(q, "user_id", "user_001"),
-        "trace_id": str(uuid.uuid4())[:8],
-        "next_tool": "",
-        "answer": "",
-        "tool_used": "",
-        "ticket_action": "",
-        "history": []
-    }
+    "question": q.question,
+    "user_id": getattr(q, "user_id", "user_001"),
+    "trace_id": str(uuid.uuid4())[:8],
+    "next_tool": "",
+    "answer": "",
+    "tool_used": "",
+    "error": "",
+    "retry_count": 0,
+    "max_retries": 2,
+    "retriever": retriever  
+}
     result = supervisor_agent.invoke(initial_state)
     return {
         "answer": result["answer"],
