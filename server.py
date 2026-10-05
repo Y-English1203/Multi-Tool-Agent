@@ -10,6 +10,8 @@ from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+from supervisor_agent import supervisor_agent, SupervisorState
+import uuid
 
 # 1. 环境变量与初始化
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
@@ -44,6 +46,7 @@ retriever = HybridRetriever(vectorstore)
 
 class Question(BaseModel):
     question: str
+    user_id: str = "user_001"
     session_id: str = "default" 
 # 3. RAG 检索接口（混合检索）
 @app.post("/ask")
@@ -142,3 +145,23 @@ def ask_auto(q: Question):
         conversation_history[session_id] = history[-MAX_HISTORY * 2:]
 
     return {"route": route_name, "answer": answer, "history_length": len(history) // 2}
+
+@app.post("/ask/supervisor")
+def ask_supervisor(q: Question):
+    """Supervisor 多 Agent 协作接口"""
+    initial_state: SupervisorState = {
+        "question": q.question,
+        "user_id": getattr(q, "user_id", "user_001"),
+        "trace_id": str(uuid.uuid4())[:8],
+        "next_tool": "",
+        "answer": "",
+        "tool_used": "",
+        "ticket_action": "",
+        "history": []
+    }
+    result = supervisor_agent.invoke(initial_state)
+    return {
+        "answer": result["answer"],
+        "tool_used": result["tool_used"],
+        "trace_id": result["trace_id"]
+    }
