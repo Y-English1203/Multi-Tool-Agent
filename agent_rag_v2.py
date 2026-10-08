@@ -1,162 +1,287 @@
 import os
 from typing import TypedDict
+
 from dotenv import load_dotenv
 from openai import OpenAI
 from langgraph.graph import StateGraph, END
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_OFFLINE"] = "1"
+
 load_dotenv()
-client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+
+client = OpenAI(
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    base_url="https://api.deepseek.com"
+)
 
 
-# ============ 状态定义 ============
+# ============================================================
+# State
+# ============================================================
+
 class AgentState(TypedDict):
     question: str
-    need_retrieval: bool
     context: str
     answer: str
+
     has_citation: bool
+
     retry_count: int
     max_retries: int
-    vectorstore: object
+
+    # 使用项目现有的 HybridRetriever
+    retriever: object
 
 
-# ============ 节点函数 ============
-def classify_intent(state: AgentState) -> AgentState:
-    """判断问题是否需要查文档"""
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{
-            "role": "user",
-            "content": f"你是一个处理上传文档的助手。除非用户明显只是在打招呼或闲聊（比如'你好'、'今天天气怎么样'），否则一律回答 yes，去查询文档。\n\n用户问题：{state['question']}\n\n只回答 yes 或 no："
-        }],
-        temperature=0
-    )
-    text = response.choices[0].message.content.strip().lower()
-    state["need_retrieval"] = "yes" in text
-    return state
-
+# ============================================================
+# 1. 检索
+# ============================================================
 
 def retrieve(state: AgentState) -> AgentState:
-    """检索文档，重试时自动加大检索范围"""
-    if state["vectorstore"] is None:
+
+    retriever = state["retriever"]
+
+    # 第一次检索 5 条
+    # 重试时扩大到 10 条
+    top_k = 5 if state["retry_count"] == 0 else 10
+
+    try:
+        docs = retriever.retrieve(
+            state["question"],
+            top_k=top_k
+        )
+
+        if not docs:
+            state["context"] = ""
+            return state
+
+        parts = []
+
+        for index, doc in enumerate(docs):
+
+            parts.append(
+                f"[检索结果 {index + 1}]\n{doc}"
+            )
+
+        state["context"] = "\n\n".join(parts)
+
+        print(
+            f"[RAG] 检索结果数量：{len(docs)}"
+        )
+
+        print(
+            f"[RAG] 当前 Top-K：{top_k}"
+        )
+
+        print(
+            "[RAG] 上下文前200字：",
+            state["context"][:200]
+        )
+
+    except Exception as e:
+
+        print(
+            f"[RAG] 检索失败：{e}"
+        )
+
         state["context"] = ""
-        return state
 
-    # 重试时把 k 从 8 增加到 15
-    k = 8 if state["retry_count"] == 0 else 15
-    retriever = state["vectorstore"].as_retriever(search_kwargs={"k": k})
-    docs = retriever.invoke(state["question"])
-
-    if not docs:
-        state["context"] = ""
-        return state
-
-    parts = []
-    for doc in docs:
-        page = doc.metadata.get('page', '未知')
-        if isinstance(page, int):
-            page = page + 1
-        parts.append(f"[第{page}页] {doc.page_content}")
-    
-    state["context"] = "\n\n".join(parts)
-    
-    # 调试语句：打印前100字，确认页码是否拼进去了
-    print("【调试】检索到的上下文前100字：", state["context"][:100])
-    
     return state
 
-    # 重试时把 k 从 8 增加到 15
-    k = 8 if state["retry_count"] == 0 else 15
-    retriever = state["vectorstore"].as_retriever(search_kwargs={"k": k})
-    docs = retriever.invoke(state["question"])
 
-    if not docs:
-        state["context"] = ""
-        return state
-
-    parts = []
-    for doc in docs:
-        page = doc.metadata.get('page', '未知')
-        if isinstance(page, int):
-            page = page + 1
-        parts.append(f"[第{page}页] {doc.page_content}")
-    state["context"] = "\n\n".join(parts)
-    return state
-
+# ============================================================
+# 2. 生成答案
+# ============================================================
 
 def generate(state: AgentState) -> AgentState:
-    """基于上下文生成回答"""
-    if not state["context"]:
-        state["answer"] = "文档中未找到相关内容。"
+
+    context = state["context"]
+
+    if not context:
+
+        state["answer"] = (
+            "文档中未找到相关内容。"
+        )
+
         state["has_citation"] = False
+
         return state
 
     response = client.chat.completions.create(
         model="deepseek-chat",
         messages=[
-            {"role": "system", "content": f"你是一个严格的文档助手。请严格根据以下文档内容回答问题。\n\n【强制要求】\n1. 只使用文档中提到的内容，不要编造。\n2. 回答末尾必须标注引用页码，格式严格为 [第X页]，例如 [第5页]。\n3. 如果文档未提及，请回答'文档中未提及'。\n\n【文档内容】\n{state['context']}"},
-            {"role": "user", "content": state["question"]}
-        ]
+            {
+                "role": "system",
+                "content": f"""
+你是一个严格的企业知识库问答助手。
+
+请严格根据下面的检索内容回答用户问题。
+
+要求：
+
+1. 只能使用检索内容中的信息。
+2. 不允许编造。
+3. 如果检索内容无法回答问题，
+   请回答“文档中未提及”。
+4. 回答简洁、准确。
+5. 不要暴露“检索结果1”等内部信息。
+
+检索内容：
+
+========================
+
+{context}
+
+========================
+"""
+            },
+            {
+                "role": "user",
+                "content": state["question"]
+            }
+        ],
+        temperature=0.1
     )
-    state["answer"] = response.choices[0].message.content
-    state["has_citation"] = "[第" in state["answer"] and "页]" in state["answer"]
+
+    answer = (
+        response.choices[0]
+        .message.content
+        .strip()
+    )
+
+    state["answer"] = answer
+
+    # 当前 HybridRetriever 返回纯文本，
+    # 所以第一版暂时通过回答内容判断是否包含引用。
+    state["has_citation"] = (
+        "[第" in answer
+        and "页]" in answer
+    )
+
     return state
 
 
-def direct_answer(state: AgentState) -> AgentState:
-    """不检索，直接回答"""
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "user", "content": state["question"]}]
-    )
-    state["answer"] = response.choices[0].message.content
-    state["has_citation"] = True  # 直接回答不参与重试
-    return state
-
+# ============================================================
+# 3. 重试
+# ============================================================
 
 def retry_retrieve(state: AgentState) -> AgentState:
-    """重试节点：增加计数"""
+
     state["retry_count"] += 1
+
+    print(
+        f"[RAG] 开始第 "
+        f"{state['retry_count']} 次重新检索"
+    )
+
     return state
 
 
-# ============ 路由函数 ============
-def route_after_classify(state: AgentState) -> str:
-    return "retrieve" if state["need_retrieval"] else "direct_answer"
+# ============================================================
+# 4. 生成后路由
+# ============================================================
 
+def route_after_generate(
+    state: AgentState
+) -> str:
 
-def route_after_generate(state: AgentState) -> str:
-    if state["has_citation"] or state["retry_count"] >= state["max_retries"]:
+    # 已经有引用
+    if state["has_citation"]:
         return "end"
-    return "retry_retrieve"
+
+    # 达到最大重试次数
+    if (
+        state["retry_count"]
+        >= state["max_retries"]
+    ):
+        return "end"
+
+    # 没有引用 -> 重新检索
+    return "retry"
 
 
-# ============ 构建图 ============
+# ============================================================
+# 5. 构建 RAG Graph
+# ============================================================
+
 def build_graph():
+
     graph = StateGraph(AgentState)
-    graph.add_node("classify_intent", classify_intent)
-    graph.add_node("retrieve", retrieve)
-    graph.add_node("generate", generate)
-    graph.add_node("direct_answer", direct_answer)
-    graph.add_node("retry_retrieve", retry_retrieve)
 
-    graph.set_entry_point("classify_intent")
+    graph.add_node(
+        "retrieve",
+        retrieve
+    )
 
-    graph.add_conditional_edges("classify_intent", route_after_classify, {
-        "retrieve": "retrieve",
-        "direct_answer": "direct_answer"
-    })
-    graph.add_edge("retrieve", "generate")
-    graph.add_conditional_edges("generate", route_after_generate, {
-        "end": END,
-        "retry_retrieve": "retry_retrieve"
-    })
-    graph.add_edge("retry_retrieve", "retrieve")
-    graph.add_edge("direct_answer", END)
+    graph.add_node(
+        "generate",
+        generate
+    )
+
+    graph.add_node(
+        "retry_retrieve",
+        retry_retrieve
+    )
+
+    graph.set_entry_point(
+        "retrieve"
+    )
+
+    graph.add_edge(
+        "retrieve",
+        "generate"
+    )
+
+    graph.add_conditional_edges(
+        "generate",
+        route_after_generate,
+        {
+            "end": END,
+            "retry": "retry_retrieve"
+        }
+    )
+
+    graph.add_edge(
+        "retry_retrieve",
+        "retrieve"
+    )
 
     return graph.compile()
 
 
 agent = build_graph()
+
+
+# ============================================================
+# 6. 对外统一接口
+# ============================================================
+
+def run_rag(
+    question: str,
+    retriever,
+    max_retries: int = 1
+):
+
+    initial_state: AgentState = {
+
+        "question": question,
+
+        "context": "",
+
+        "answer": "",
+
+        "has_citation": False,
+
+        "retry_count": 0,
+
+        "max_retries": max_retries,
+
+        "retriever": retriever
+    }
+
+    result = agent.invoke(
+        initial_state
+    )
+
+    return result

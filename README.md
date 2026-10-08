@@ -11,6 +11,10 @@
 - **多轮对话与澄清**：基于 session_id 管理会话历史，无历史时自动澄清。
 - **全链路追踪**：每个请求生成 Trace ID，日志可追踪完整调用链路。
 - **工程化交付**：FastAPI 封装 RESTful API，支持 SSE 流式输出，Docker 一键部署。
+## 多 Agent 协作架构
+- **Supervisor 调度**：统一入口，根据问题类型动态路由到 RAG、Text-to-SQL、Ticket Agent。
+- **全链路追踪**：每个请求生成 Trace ID，日志可追踪完整调用链路。
+- **可靠性设计**：每个工具节点带 try/except 错误捕获，失败自动回 Supervisor 重新调度，最多重试 2 次。
 
 ## 技术栈
 

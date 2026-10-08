@@ -1,170 +1,315 @@
 import os
+import uuid
+import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from openai import OpenAI
 from dotenv import load_dotenv
-from text2sql import text2sql
+
 from hybrid_retriever import HybridRetriever
+from text2sql import text2sql
+from supervisor_agent import supervisor_agent, SupervisorState
+
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from supervisor_agent import supervisor_agent, SupervisorState
-import uuid
 
 
-# 1. 环境变量与初始化
+# ============================================================
+# 1. 环境变量
+# ============================================================
+
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_OFFLINE"] = "1"
-load_dotenv()
-client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
 
-app = FastAPI()
-# 存储对话历史，key 是 session_id，value 是消息列表
-conversation_history = {}
-MAX_HISTORY = 10  # 每个会话最多保留10轮对话
+load_dotenv()
+
+
+# ============================================================
+# 2. FastAPI
+# ============================================================
+
+app = FastAPI(
+    title="Multi-Tool Agent",
+    description="基于 Multi-Agent 的企业智能助手系统",
+    version="1.0.0"
+)
+
+
+# ============================================================
+# 3. 加载知识库
+# ============================================================
 
 def load_vectorstore():
+
     reader = PdfReader("test.pdf")
+
     docs = []
+
     for i, page in enumerate(reader.pages):
+
         text = page.extract_text()
+
         if text and text.strip():
+
             from langchain_core.documents import Document
-            docs.append(Document(page_content=text, metadata={"page": i}))
-            
-    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=100)
+
+            docs.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "page": i + 1
+                    }
+                )
+            )
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=300,
+        chunk_overlap=100
+    )
+
     chunks = splitter.split_documents(docs)
-    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-zh-v1.5")
-    return Chroma.from_documents(chunks, embeddings)
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-small-zh-v1.5"
+    )
+
+    return Chroma.from_documents(
+        chunks,
+        embeddings
+    )
+
+
+# ============================================================
+# 4. 全局初始化
+# ============================================================
 
 vectorstore = load_vectorstore()
-retriever = HybridRetriever(vectorstore)
-# 2. 初始化向量库与检索器（假设 load_vectorstore 已经在其他地方定义好了，如果没有请自行补充）
-vectorstore = load_vectorstore()
-retriever = HybridRetriever(vectorstore)
+
+retriever = HybridRetriever(
+    vectorstore
+)
+
+
+# ============================================================
+# 5. 请求模型
+# ============================================================
 
 class Question(BaseModel):
+
     question: str
+
     user_id: str = "user_001"
-    session_id: str = "default" 
-# 3. RAG 检索接口（混合检索）
-@app.post("/ask")
-def ask(q: Question):
-    docs = retriever.retrieve(q.question, top_k=5)
-    context = "\n\n".join(docs)
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {"role": "system", "content": f"请严格根据以下文档内容回答问题，末尾标注引用页码。\n\n文档内容：\n{context}"},
-            {"role": "user", "content": q.question}
-        ]
-    )
-    return {"answer": response.choices[0].message.content}
 
-# 4. SSE 流式接口
-@app.post("/ask/stream")
-async def ask_stream(q: Question):
-    retriever_docs = retriever.retrieve(q.question, top_k=5)
-    context = "\n\n".join(retriever_docs)
+    session_id: str = "default"
 
-    async def event_generator():
-        stream = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": f"请严格根据以下文档回答。\n\n文档内容：\n{context}"},
-                {"role": "user", "content": q.question}
-            ],
-            stream=True
-        )
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield f"data: {chunk.choices[0].delta.content}\n\n"
-        yield "data: [DONE]\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+# ============================================================
+# 6. 系统状态
+# ============================================================
 
-# 5. Text-to-SQL 数据查询接口
-@app.post("/ask/data")
-def ask_data(q: Question):
-    answer = text2sql(q.question)
-    return {"answer": answer}
+@app.get("/")
+def root():
 
-# 6. Agent 自动路由接口
-@app.post("/ask/auto")
-def ask_auto(q: Question):
-    """Agent 自动路由 + 多轮对话记忆 + 澄清机制"""
-    session_id = q.session_id
+    return {
+        "system": "Multi-Tool Agent",
+        "status": "running",
+        "main_endpoint": "/ask/supervisor"
+    }
 
-    # 1. 获取历史
-    if session_id not in conversation_history:
-        conversation_history[session_id] = []
-    history = conversation_history[session_id]
 
-    # 2. 澄清机制：如果问题含模糊指代且无历史，主动反问
-    ambiguous_words = ["它", "这个", "那个", "上面说的", "刚刚的"]
-    if any(w in q.question for w in ambiguous_words) and len(history) == 0:
-        return {
-            "route": "clarify",
-            "answer": "请问您指的是什么？可以补充一下具体对象吗？"
-        }
+@app.get("/health")
+def health():
 
-    # 3. 后续路由逻辑不变
-    route_response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{
-            "role": "user",
-            "content": f"判断这个问题是关于文档内容的，还是关于数据统计的。只回答'文档'或'数据'。\n\n问题：{q.question}"
-        }],
-        temperature=0
-    )
-    route = route_response.choices[0].message.content.strip()
+    return {
+        "status": "healthy"
+    }
 
-    if "数据" in route:
-        answer = text2sql(q.question)
-        route_name = "text2sql"
-    else:
-        docs = retriever.retrieve(q.question, top_k=5)
-        context = "\n\n".join(docs)
-        messages = [
-            {"role": "system", "content": f"请严格根据以下文档内容回答问题。\n\n文档内容：\n{context}"}
-        ]
-        messages.extend(history[-MAX_HISTORY:])
-        messages.append({"role": "user", "content": q.question})
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=messages
-        )
-        answer = response.choices[0].message.content
-        route_name = "rag"
 
-    # 4. 存入历史
-    history.append({"role": "user", "content": q.question})
-    history.append({"role": "assistant", "content": answer})
-    if len(history) > MAX_HISTORY * 2:
-        conversation_history[session_id] = history[-MAX_HISTORY * 2:]
-
-    return {"route": route_name, "answer": answer, "history_length": len(history) // 2}
+# ============================================================
+# 7. ⭐ 主入口：Supervisor Multi-Agent
+# ============================================================
 
 @app.post("/ask/supervisor")
 def ask_supervisor(q: Question):
-    """Supervisor 多 Agent 协作接口"""
+
+    trace_id = str(uuid.uuid4())[:8]
+
+    print(
+        f"[Trace: {trace_id}] "
+        f"收到用户请求：{q.question}"
+    )
+
     initial_state: SupervisorState = {
-    "question": q.question,
-    "user_id": getattr(q, "user_id", "user_001"),
-    "trace_id": str(uuid.uuid4())[:8],
-    "next_tool": "",
-    "answer": "",
-    "tool_used": "",
-    "error": "",
-    "retry_count": 0,
-    "max_retries": 2,
-    "retriever": retriever  
-}
-    result = supervisor_agent.invoke(initial_state)
-    return {
-        "answer": result["answer"],
-        "tool_used": result["tool_used"],
-        "trace_id": result["trace_id"]
+
+        "question": q.question,
+
+        "user_id": q.user_id,
+
+        "trace_id": trace_id,
+
+        "next_tool": "",
+
+        "answer": "",
+
+        "tool_used": "",
+
+        "error": "",
+
+        "retry_count": 0,
+
+        "max_retries": 2,
+
+        "retriever": retriever
     }
+
+    try:
+
+        result = supervisor_agent.invoke(
+            initial_state
+        )
+
+        return {
+
+            "answer": result.get(
+                "answer",
+                ""
+            ),
+
+            "tool_used": result.get(
+                "tool_used",
+                ""
+            ),
+
+            "trace_id": result.get(
+                "trace_id",
+                trace_id
+            ),
+
+            "success": not bool(
+                result.get("error")
+            )
+        }
+
+    except Exception as e:
+
+        print(
+            f"[Trace: {trace_id}] "
+            f"系统异常：{e}"
+        )
+
+        return {
+
+            "answer": "系统暂时无法处理该请求，请稍后再试。",
+
+            "tool_used": "",
+
+            "trace_id": trace_id,
+
+            "success": False,
+
+            "error": str(e)
+        }
+
+
+# ============================================================
+# 8. 开发调试：直接测试 RAG
+# ============================================================
+
+@app.post("/ask/rag")
+def ask_rag(q: Question):
+
+    docs = retriever.retrieve(
+        q.question,
+        top_k=5
+    )
+
+    return {
+
+        "question": q.question,
+
+        "documents": docs,
+
+        "count": len(docs)
+    }
+
+
+# ============================================================
+# 9. 开发调试：直接测试 Text-to-SQL
+# ============================================================
+
+@app.post("/ask/data")
+def ask_data(q: Question):
+
+    answer = text2sql(
+        q.question
+    )
+
+    return {
+
+        "question": q.question,
+
+        "answer": answer,
+
+        "tool_used": "sql"
+    }
+
+
+# ============================================================
+# 10. 开发调试：直接测试 Supervisor 路由
+# ============================================================
+
+@app.post("/debug/route")
+def debug_route(q: Question):
+
+    trace_id = str(uuid.uuid4())[:8]
+
+    initial_state: SupervisorState = {
+
+        "question": q.question,
+
+        "user_id": q.user_id,
+
+        "trace_id": trace_id,
+
+        "next_tool": "",
+
+        "answer": "",
+
+        "tool_used": "",
+
+        "error": "",
+
+        "retry_count": 0,
+
+        "max_retries": 0,
+
+        "retriever": retriever
+    }
+
+    result = supervisor_agent.invoke(
+        initial_state
+    )
+
+    return {
+
+        "question": q.question,
+
+        "selected_tool": result.get(
+            "next_tool"
+        ),
+
+        "trace_id": trace_id
+    }
+
+
+# ============================================================
+# 11. 启动
+# ============================================================
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=8000
+    )
