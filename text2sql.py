@@ -99,80 +99,39 @@ def generate_sql(question: str, schema: str) -> str:
 
     return sql
 
+
 def validate_sql(sql: str, schema: str):
     """
     SQL Validator：
     1. 只允许 SELECT 查询
-    2. 检查 SQL 中使用的表是否存在
-    3. 检查 SQL 中使用的字段是否存在
-
-    返回：
-        True, ""
-        或
-        False, "错误原因"
+    2. 允许查询 SQLite 元数据表（例如 sqlite_master）
+    3. 使用 SQLite 自身的解析器检查表、字段和 SQL 语法
+    4. 不执行实际查询，只进行查询计划检查
     """
 
-    # =========================
-    # 1. 检查 SQL 是否为空
-    # =========================
     if not sql or not sql.strip():
         return False, "SQL 为空"
 
-    sql_upper = sql.strip().upper()
+    sql = sql.strip()
 
-    # =========================
-    # 2. 只允许 SELECT
-    # =========================
-    if not sql_upper.startswith("SELECT"):
-        return False, "只允许执行 SELECT 查询"
+    # 只允许 SELECT，拒绝 INSERT、UPDATE、DELETE 等操作
+    if not sql.upper().startswith("SELECT "):
+        return False, "目前只允许 SELECT 查询"
 
-    # =========================
-    # 3. 禁止危险 SQL
-    # =========================
-    forbidden_keywords = [
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "DROP",
-        "ALTER",
-        "CREATE",
-        "REPLACE",
-        "TRUNCATE"
-    ]
+    # 连接实际数据库，以只读模式进行校验
+    from pathlib import Path
 
-    for keyword in forbidden_keywords:
-        if keyword in sql_upper:
-            return False, f"检测到禁止的 SQL 操作：{keyword}"
+    db_uri = Path(DB_PATH).resolve().as_uri() + "?mode=ro"
 
-    # =========================
-    # 4. 从 Schema 中提取真实表名
-    # =========================
-    real_tables = set()
+    try:
+        with sqlite3.connect(db_uri, uri=True) as conn:
+            # SQLite 查询计划检查，不执行实际查询结果
+            conn.execute("EXPLAIN QUERY PLAN " + sql)
 
-    for line in schema.splitlines():
-        line = line.strip()
+        return True, ""
 
-        if not line.startswith("- "):
-            continue
-
-        table_part = line[2:].split("(", 1)[0].strip()
-
-        if table_part:
-            real_tables.add(table_part.lower())
-
-    # =========================
-    # 5. 检查 SQL 中的表
-    # =========================
-    sql_lower = sql.lower()
-
-    for table in real_tables:
-        if f"from {table}" in sql_lower:
-            break
-    else:
-        # 如果没有找到 FROM 中的真实表
-        return False, "SQL 使用了数据库中不存在的表"
-
-    return True, ""
+    except sqlite3.Error as e:
+        return False, f"SQL 语法或表字段校验失败：{e}"
 
 def execute_sql(sql: str):
     """

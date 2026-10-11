@@ -1,6 +1,7 @@
 import os
 import uuid
 import uvicorn
+import traceback
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+from conversation_memory import get_history, save_message
 
 
 # ============================================================
@@ -95,13 +97,11 @@ retriever = HybridRetriever(
 # 5. 请求模型
 # ============================================================
 
+
 class Question(BaseModel):
-
     question: str
-
     user_id: str = "user_001"
-
-    session_id: str = "default"
+    session_id: str | None = None
 
 
 # ============================================================
@@ -130,87 +130,75 @@ def health():
 # 7. ⭐ 主入口：Supervisor Multi-Agent
 # ============================================================
 
+
+
 @app.post("/ask/supervisor")
 def ask_supervisor(q: Question):
-
     trace_id = str(uuid.uuid4())[:8]
+    session_id = q.session_id or str(uuid.uuid4())
 
     print(
         f"[Trace: {trace_id}] "
+        f"[Session: {session_id}] "
         f"收到用户请求：{q.question}"
     )
 
-    initial_state: SupervisorState = {
-
-        "question": q.question,
-
-        "user_id": q.user_id,
-
-        "trace_id": trace_id,
-
-        "next_tool": "",
-
-        "answer": "",
-
-        "tool_used": "",
-
-        "error": "",
-
-        "retry_count": 0,
-
-        "max_retries": 2,
-
-        "retriever": retriever
-    }
-
     try:
+        history = get_history(q.user_id, session_id)
 
-        result = supervisor_agent.invoke(
-            initial_state
-        )
+        initial_state: SupervisorState = {
+            "question": q.question,
+            "resolved_question": q.question,
+            "user_id": q.user_id,
+            "trace_id": trace_id,
+            "history": history,
+            "next_tool": "",
+            "answer": "",
+            "tool_used": "",
+            "error": "",
+            "retry_count": 0,
+            "max_retries": 2,
+            "retriever": retriever,
+            "sources": []
+        }
+
+        result = supervisor_agent.invoke(initial_state)
+
+        answer = result.get("answer", "")
+        success = not bool(result.get("error"))
+
+        # 只记录已完成的正常执行结果
+        if success:
+            save_message(
+                q.user_id, session_id, "user", q.question
+            )
+            save_message(
+                q.user_id, session_id, "assistant", answer
+            )
 
         return {
-
-            "answer": result.get(
-                "answer",
-                ""
+            "answer": answer,
+            "tool_used": result.get("tool_used", ""),
+            "sources": result.get(
+                "sources",
+                []
             ),
-
-            "tool_used": result.get(
-                "tool_used",
-                ""
-            ),
-
-            "trace_id": result.get(
-                "trace_id",
-                trace_id
-            ),
-
-            "success": not bool(
-                result.get("error")
-            )
+            "trace_id": result.get("trace_id", trace_id),
+            "session_id": session_id,
+            "success": success,
         }
 
     except Exception as e:
-
-        print(
-            f"[Trace: {trace_id}] "
-            f"系统异常：{e}"
-        )
+        traceback.print_exc()
 
         return {
-
             "answer": "系统暂时无法处理该请求，请稍后再试。",
-
             "tool_used": "",
-
             "trace_id": trace_id,
-
+            "session_id": session_id,
             "success": False,
-
-            "error": str(e)
+            "error": str(e),
         }
-
 
 # ============================================================
 # 8. 开发调试：直接测试 RAG
@@ -265,26 +253,18 @@ def debug_route(q: Question):
     trace_id = str(uuid.uuid4())[:8]
 
     initial_state: SupervisorState = {
-
-        "question": q.question,
-
-        "user_id": q.user_id,
-
-        "trace_id": trace_id,
-
-        "next_tool": "",
-
-        "answer": "",
-
-        "tool_used": "",
-
-        "error": "",
-
-        "retry_count": 0,
-
-        "max_retries": 0,
-
-        "retriever": retriever
+    "question": q.question,
+    "resolved_question": q.question,
+    "user_id": q.user_id,
+    "history": get_history(q.user_id, q.session_id or "debug"),
+    "trace_id": trace_id,
+    "next_tool": "",
+    "answer": "",
+    "tool_used": "",
+    "error": "",
+    "retry_count": 0,
+    "max_retries": 0,
+    "retriever": retriever,
     }
 
     result = supervisor_agent.invoke(

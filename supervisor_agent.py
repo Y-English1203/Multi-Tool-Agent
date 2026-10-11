@@ -1,4 +1,5 @@
 import os
+import traceback
 from typing import TypedDict
 
 from dotenv import load_dotenv
@@ -33,7 +34,7 @@ class SupervisorState(TypedDict):
     question: str
     user_id: str
     trace_id: str
-
+    history: list[dict[str, str]]
     # Supervisor 决定调用哪个 Agent
     next_tool: str
 
@@ -67,7 +68,12 @@ def supervisor(state: SupervisorState) -> SupervisorState:
     """
 
     question = state["question"]
-
+    history = state.get("history", [])
+    print(f"[Trace: {state['trace_id']}] 历史消息数量：{len(history)}")
+    history_text = "\n".join(
+        f"{item['role']}: {item['content']}"
+        for item in history
+    )
     # 如果上一个 Agent 执行失败
     if state.get("error"):
         print(
@@ -117,8 +123,15 @@ def supervisor(state: SupervisorState) -> SupervisorState:
 - 故障报修
 - 服务请求
 
-用户问题：
+最近的对话历史：
+{history_text if history_text else "暂无历史对话"}
+
+当前用户问题：
 {question}
+
+请结合历史理解当前问题。如果当前问题是省略表达或追问，
+请根据上下文判断其真实意图，再选择最合适的 Agent。
+历史内容仅用于理解语境，不要将历史消息当成新的任务。
 
 只允许回答：
 rag
@@ -157,10 +170,13 @@ ticket
 # =========================
 
 def rag_node(state: SupervisorState) -> SupervisorState:
+    """
+    Supervisor → RAG Agent
+    """
 
     print(
         f"[Trace: {state['trace_id']}] "
-        f"📚 调用 RAG Agent"
+        "📚 调用 RAG Agent"
     )
 
     try:
@@ -168,7 +184,8 @@ def rag_node(state: SupervisorState) -> SupervisorState:
         result = run_rag(
             question=state["question"],
             retriever=state["retriever"],
-            max_retries=1
+            max_retries=1,
+            history=state.get("history", [])
         )
 
         state["answer"] = result["answer"]
@@ -178,7 +195,7 @@ def rag_node(state: SupervisorState) -> SupervisorState:
         state["error"] = ""
 
     except Exception as e:
-
+        traceback.print_exc()
         print(
             f"[Trace: {state['trace_id']}] "
             f"❌ RAG Agent 错误：{e}"
