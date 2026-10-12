@@ -100,9 +100,8 @@ retriever = HybridRetriever(
 
 class Question(BaseModel):
     question: str
-    user_id: str = "user_001"
-    session_id: str | None = None
-
+    user_id: str = "default_user"
+    session_id: str = "default"
 
 # ============================================================
 # 6. 系统状态
@@ -145,7 +144,9 @@ def ask_supervisor(q: Question):
 
     try:
         history = get_history(q.user_id, session_id)
+        print(f"[Memory] 当前历史数量：{len(history)}")
 
+        # print(f"[Memory] 当前历史内容：{history}")
         initial_state: SupervisorState = {
             "question": q.question,
             "resolved_question": q.question,
@@ -164,9 +165,14 @@ def ask_supervisor(q: Question):
 
         result = supervisor_agent.invoke(initial_state)
 
+        # print("==============================")
+        # print("最终 Supervisor State:")
+        # print(result)
+        # print("==============================")
+
+
         answer = result.get("answer", "")
         success = not bool(result.get("error"))
-
         # 只记录已完成的正常执行结果
         if success:
             save_message(

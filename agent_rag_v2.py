@@ -19,15 +19,17 @@ client = OpenAI(
 
 class AgentState(TypedDict):
     question: str
+    search_question: str
     need_retrieval: bool
     context: str
     answer: str
     has_citation: bool
+    history: list[dict[str, str]]
+    sources: list[dict]
+
     retry_count: int
     max_retries: int
     retriever: object
-    history: list[dict[str, str]]
-    search_question: str
 
 def rewrite_question(state: AgentState) -> AgentState:
     """
@@ -162,11 +164,17 @@ def retrieve(state: AgentState) -> AgentState:
             return state
 
         parts = []
+        state["sources"] = []
 
         for index, doc in enumerate(docs):
             # 明确提取正文和页码 metadata
             page = doc.metadata.get("page")
-
+            state["sources"].append(
+            {
+                "page": page,
+                "content": doc.page_content[:300]
+            }
+            )
             if page is None:
                 page_label = "页码未知"
             else:
@@ -408,20 +416,26 @@ def run_rag(
 ):
     """
     RAG Agent 对外统一调用入口。
-    支持传入对话历史，供后续追问改写使用。
+    支持对话历史和检索来源返回。
     """
 
-    initial_state: AgentState = {
+    initial_state = {
         "question": question,
         "need_retrieval": True,
         "context": "",
         "answer": "",
         "has_citation": False,
+        "sources": [],
+        "history": history or [],
         "retry_count": 0,
         "max_retries": max_retries,
-        "retriever": retriever,
-        "search_question": question,
-        "history": history or []
+        "retriever": retriever
     }
 
-    return agent.invoke(initial_state)
+    result = agent.invoke(initial_state)
+
+    return {
+        "answer": result.get("answer", ""),
+        "sources": result.get("sources", []),
+        "has_citation": result.get("has_citation", False)
+    }

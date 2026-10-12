@@ -101,10 +101,10 @@ class HybridRetriever:
             query,
             k=top_k
         )
-        for i, doc in enumerate(docs):
-            print(f"\n--- 检索结果 {i + 1} ---")
-            print("内容：", doc.page_content[:200])
-            print("metadata：", doc.metadata)
+        # for i, doc in enumerate(docs):
+        #     print(f"\n--- 检索结果 {i + 1} ---")
+        #     print("内容：", doc.page_content[:200])
+        #     print("metadata：", doc.metadata)
 
         return docs
 
@@ -236,9 +236,36 @@ class HybridRetriever:
         )
 
         final = self._rerank(
-            query,
-            fused[:20],
-            top_k=top_k
+        query,
+        fused[:20],
+        top_k=top_k * 2
         )
 
-        return final
+
+        # 页码去重，避免 Top-K 全来自同一页
+        selected = []
+        seen_pages = set()
+
+        for doc in final:
+
+            page = doc.metadata.get("page")
+
+            if page not in seen_pages:
+                selected.append(doc)
+                seen_pages.add(page)
+
+            if len(selected) >= top_k:
+                break
+
+
+        # 如果不足 top_k，再补充剩余高相关结果
+        if len(selected) < top_k:
+            for doc in final:
+                if doc not in selected:
+                    selected.append(doc)
+
+                if len(selected) >= top_k:
+                    break
+
+
+        return selected
