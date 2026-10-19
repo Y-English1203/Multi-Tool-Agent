@@ -1,271 +1,201 @@
+"""混合检索器。
+
+BM25 关键词召回 + Vector 语义召回 -> RRF 融合 -> CrossEncoder 精排。
+全流程保留 Document 及 metadata（来源文档、页码），供回答引用。
+"""
+
+from __future__ import annotations
+
 import os
+from typing import Any
 
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
 from langchain_core.documents import Document
+from rank_bm25 import BM25Okapi
 
 
 class HybridRetriever:
-    """
-    混合检索器：
-
-    BM25 关键词召回
-        +
-    Vector 语义召回
-        ↓
-    RRF 融合
-        ↓
-    CrossEncoder Reranker 精排
-        ↓
-    Top-K
-
-    注意：
-    全流程保留 Document 和 metadata，
-    避免 PDF 页码等信息在检索过程中丢失。
-    """
-
     def __init__(
         self,
         vectorstore,
-        reranker_model="BAAI/bge-reranker-base"
+        reranker_model: str = "BAAI/bge-reranker-base",
+        use_reranker: bool = True,
     ):
         self.vectorstore = vectorstore
+        self.reranker = None
+        self.reranker_model = reranker_model
 
-        print("[HybridRetriever] 正在加载 Reranker...")
-        self.reranker = CrossEncoder(reranker_model)
+        if use_reranker:
+            try:
+                print(f"[HybridRetriever] 正在加载 Reranker：{reranker_model}")
+                from sentence_transformers import CrossEncoder
 
-        # 从向量库读取文档和 metadata
-        data = vectorstore.get()
+                self.reranker = CrossEncoder(reranker_model, device="cpu")
+                print("[HybridRetriever] Reranker 加载完成")
+            except Exception as exc:
+                print(f"[HybridRetriever] Reranker 不可用，降级为 RRF 排序：{exc}")
 
-        documents = data.get("documents", [])
-        metadatas = data.get("metadatas", [])
+        self.all_docs: list[Document] = []
+        self.bm25: BM25Okapi | None = None
+        self._load_documents()
+
+    def _load_documents(self) -> None:
+        data = self.vectorstore.get()
+        documents = data.get("documents", []) or []
+        metadatas = data.get("metadatas", []) or []
 
         self.all_docs = []
-
-        for i, content in enumerate(documents):
-            metadata = {}
-
-            if i < len(metadatas) and metadatas[i]:
-                metadata = metadatas[i]
-
+        for index, content in enumerate(documents):
+            metadata = metadatas[index] if index < len(metadatas) else {}
             self.all_docs.append(
-                Document(
-                    page_content=content,
-                    metadata=metadata
-                )
+                Document(page_content=content, metadata=metadata or {})
             )
 
-        # BM25 使用纯文本建立索引
-        self.tokenized_corpus = [
-            list(doc.page_content)
-            for doc in self.all_docs
-        ]
+        if self.all_docs:
+            corpus = [list(doc.page_content) for doc in self.all_docs]
+            self.bm25 = BM25Okapi(corpus)
+        else:
+            self.bm25 = None
 
-        self.bm25 = BM25Okapi(self.tokenized_corpus)
+        print(f"[HybridRetriever] 文档切片数量：{len(self.all_docs)}")
 
-        print(
-            f"[HybridRetriever] 文档数量：{len(self.all_docs)}"
-        )
+    def refresh(self) -> None:
+        """知识库变更后重建内存索引。"""
+        self._load_documents()
 
-    def _bm25_search(self, query, top_k=20):
-        """
-        BM25 关键词检索。
-        返回 Document，而不是字符串。
-        """
+    def _bm25_search(self, query: str, top_k: int = 20) -> list[Document]:
+        if not self.bm25 or not self.all_docs:
+            return []
 
-        tokenized_query = list(query)
-
-        scores = self.bm25.get_scores(tokenized_query)
-
+        scores = self.bm25.get_scores(list(query))
         top_indices = sorted(
             range(len(scores)),
-            key=lambda i: scores[i],
-            reverse=True
+            key=lambda index: scores[index],
+            reverse=True,
         )[:top_k]
 
-        return [
-            self.all_docs[i]
-            for i in top_indices
-        ]
+        return [self.all_docs[index] for index in top_indices if scores[index] > 0]
 
-    def _vector_search(self, query, top_k=20):
-        """
-        Vector 语义检索。
-        LangChain 返回的 Document 会保留 metadata。
-        """
-
-        docs = self.vectorstore.similarity_search(
-            query,
-            k=top_k
-        )
-        # for i, doc in enumerate(docs):
-        #     print(f"\n--- 检索结果 {i + 1} ---")
-        #     print("内容：", doc.page_content[:200])
-        #     print("metadata：", doc.metadata)
-
-        return docs
+    def _vector_search(self, query: str, top_k: int = 20) -> list[Document]:
+        try:
+            return self.vectorstore.similarity_search(query, k=top_k)
+        except Exception as exc:
+            print(f"[HybridRetriever] 向量检索失败：{exc}")
+            return []
 
     @staticmethod
-    def _doc_key(doc):
-        """
-        为 Document 创建稳定唯一 Key。
-
-        加入 page 是为了避免：
-        不同页出现完全相同文本时被错误合并。
-        """
-
+    def _doc_key(doc: Document) -> str:
         page = doc.metadata.get("page", "unknown")
-
-        return f"{page}::{doc.page_content}"
+        source = doc.metadata.get("source", "unknown")
+        return f"{source}::{page}::{doc.page_content}"
 
     def _rrf_fusion(
         self,
-        bm25_results,
-        vector_results,
-        k=60
-    ):
-        """
-        Reciprocal Rank Fusion。
-
-        同时保留 Document 对象和 metadata。
-        """
-
-        rrf_scores = {}
-        doc_map = {}
+        bm25_results: list[Document],
+        vector_results: list[Document],
+        k: int = 60,
+    ) -> list[Document]:
+        rrf_scores: dict[str, float] = {}
+        doc_map: dict[str, Document] = {}
 
         for rank, doc in enumerate(bm25_results):
-
             key = self._doc_key(doc)
-
-            rrf_scores[key] = (
-                rrf_scores.get(key, 0)
-                + 1 / (k + rank + 1)
-            )
-
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
             doc_map[key] = doc
 
         for rank, doc in enumerate(vector_results):
-
             key = self._doc_key(doc)
-
-            rrf_scores[key] = (
-                rrf_scores.get(key, 0)
-                + 1 / (k + rank + 1)
-            )
-
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank + 1)
             doc_map[key] = doc
 
-        sorted_keys = sorted(
-            rrf_scores,
-            key=rrf_scores.get,
-            reverse=True
-        )
-
-        return [
-            doc_map[key]
-            for key in sorted_keys
-        ]
+        sorted_keys = sorted(rrf_scores, key=rrf_scores.get, reverse=True)
+        return [doc_map[key] for key in sorted_keys]
 
     def _rerank(
         self,
-        query,
-        candidates,
-        top_k=5
-    ):
-        """
-        CrossEncoder 精排。
-
-        输入输出都保持 Document。
-        """
-
+        query: str,
+        candidates: list[Document],
+        top_k: int = 10,
+    ) -> list[tuple[Document, float]]:
         if not candidates:
             return []
 
-        pairs = [
-            [query, doc.page_content]
-            for doc in candidates
-        ]
+        if self.reranker is None:
+            return [
+                (doc, round(1.0 / (rank + 1), 4))
+                for rank, doc in enumerate(candidates[:top_k])
+            ]
 
+        pairs = [[query, doc.page_content] for doc in candidates]
         scores = self.reranker.predict(pairs)
 
         ranked = sorted(
             zip(candidates, scores),
-            key=lambda x: x[1],
-            reverse=True
+            key=lambda item: float(item[1]),
+            reverse=True,
         )
+        return [(doc, float(score)) for doc, score in ranked[:top_k]]
 
-        return [
-            doc
-            for doc, _ in ranked[:top_k]
-        ]
+    def retrieve_with_scores(
+        self,
+        query: str,
+        top_k: int = 5,
+    ) -> list[dict[str, Any]]:
+        bm25_results = self._bm25_search(query, top_k=20)
+        vector_results = self._vector_search(query, top_k=20)
+        fused = self._rrf_fusion(bm25_results, vector_results)
+        reranked = self._rerank(query, fused[:20], top_k=top_k * 2)
 
-    def retrieve(self, query, top_k=5):
-        """
-        完整 Hybrid Retrieval：
+        selected: list[dict[str, Any]] = []
+        seen: set[str] = set()
 
-        BM25
-          +
-        Vector
-          ↓
-        RRF
-          ↓
-        Reranker
-          ↓
-        Top-K
-
-        最终返回 Document 列表，
-        保留 metadata。
-        """
-
-        bm25_results = self._bm25_search(
-            query,
-            top_k=20
-        )
-
-        vector_results = self._vector_search(
-            query,
-            top_k=20
-        )
-
-        fused = self._rrf_fusion(
-            bm25_results,
-            vector_results
-        )
-
-        final = self._rerank(
-        query,
-        fused[:20],
-        top_k=top_k * 2
-        )
-
-
-        # 页码去重，避免 Top-K 全来自同一页
-        selected = []
-        seen_pages = set()
-
-        for doc in final:
-
+        # 优先保证页码多样性
+        for doc, score in reranked:
             page = doc.metadata.get("page")
-
-            if page not in seen_pages:
-                selected.append(doc)
-                seen_pages.add(page)
-
+            source = doc.metadata.get("source", "")
+            key = f"{source}::{page}"
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(
+                {
+                    "content": doc.page_content,
+                    "source": source,
+                    "page": page,
+                    "score": round(score, 4),
+                    "metadata": doc.metadata,
+                }
+            )
             if len(selected) >= top_k:
                 break
 
-
-        # 如果不足 top_k，再补充剩余高相关结果
+        # 结果不足时用剩余结果补齐
         if len(selected) < top_k:
-            for doc in final:
-                if doc not in selected:
-                    selected.append(doc)
-
+            used_content = {(item["content"], item.get("page")) for item in selected}
+            for doc, score in reranked:
+                if (doc.page_content, doc.metadata.get("page")) in used_content:
+                    continue
+                selected.append(
+                    {
+                        "content": doc.page_content,
+                        "source": doc.metadata.get("source", ""),
+                        "page": doc.metadata.get("page"),
+                        "score": round(score, 4),
+                        "metadata": doc.metadata,
+                    }
+                )
                 if len(selected) >= top_k:
                     break
 
-
         return selected
+
+    def retrieve(self, query: str, top_k: int = 5) -> list[Document]:
+        return [
+            Document(
+                page_content=item["content"],
+                metadata=item["metadata"],
+            )
+            for item in self.retrieve_with_scores(query, top_k=top_k)
+        ]

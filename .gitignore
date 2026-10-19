@@ -1,6 +1,31 @@
 .env
+.env.local
 *.db
+*.db-wal
+*.db-shm
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 运行时生成
+chroma_db/
+knowledge/
+logs/
+*.log
+.npm-cache/
+.pytest_cache/
+.pytest-tmp/
+.pytest-tmp*/
+tests/.tmp/
+eval_results.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
