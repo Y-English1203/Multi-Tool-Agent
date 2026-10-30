@@ -1,4 +1,4 @@
-import {
+﻿import {
   BarChart3,
   BookOpen,
   Bot,
@@ -215,7 +215,7 @@ export default function Sidebar({
                   {healthOk ? "服务运行正常" : "服务状态待检查"}
                 </p>
                 <p className="mt-0.5 truncate text-[10px] text-slate-400">
-                  v{health?.version || "2.0.0"} · Multi-Agent
+                  v{health?.version || "2.1.0"} · Multi-Agent
                 </p>
               </div>
             )}

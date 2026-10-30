@@ -1,24 +1,27 @@
 # Multi-Tool Agent · 企业智能知识中台
 
-基于 **LangGraph + FastAPI + React** 的企业级多 Agent 协作系统，面向企业内部知识问答、业务数据分析与工单管理场景。系统以 Supervisor 为统一入口，根据用户意图调度 RAG、Text-to-SQL 与 Ticket Agent，并提供完整的可视化工作台。
+基于 **LangGraph + FastAPI + React** 的企业级 Agentic 多工具协作系统，面向企业内部知识问答、业务数据分析与工单管理场景。系统以 Agentic Supervisor 为统一入口，先规划任务，再按需组合 RAG、Text-to-SQL 与 Ticket Agent，最后做证据校验与答案整合，并提供完整的可视化工作台。
 
 > 企业场景：京东集团员工手册知识库 + 京东商城业务演示数据 + 企业内部服务工单。
 
 ![工作台](screenshots/dashboard.png)
 
+![Agentic 多工具协作](screenshots/chat.png)
+
 ## 核心能力
 
 | 模块 | 能力 |
 |---|---|
-| **Supervisor** | 问题补全、意图路由、失败重试、Trace ID 调用追踪 |
+| **Agentic Supervisor** | 问题补全、任务规划、1—3 步工具编排、多工具协作、澄清追问、证据校验、置信度 |
 | **RAG Agent** | PDF 解析、BM25 + 向量混合检索、RRF 融合、CrossEncoder 精排、页码引用、引用校验 |
 | **Text-to-SQL Agent** | 真实 Schema 读取、SQL 生成、只读执行、错误自动修正、自然语言结论 |
 | **Ticket Agent** | 工单创建、列表查询、单张状态查询、关闭工单、按 `user_id` 数据隔离 |
+| **AI 经营洞察** | 基于真实统计生成发现 / 证据 / 建议 / 风险，10 分钟缓存，规则兜底 |
 | **数据分析** | 销售额 / 订单 / 客单价 / 毛利 / 品类 / 城市 / 事业部 / 渠道 / 状态多维分析 |
 | **知识库管理** | 文档列表、PDF 上传、切片索引、语义检索、删除、重建索引 |
 | **多轮记忆** | 按 `session_id` 保存历史，支持上下文追问补全 |
 | **前端工作台** | 工作台、智能问答、知识库、数据分析、工单中心、系统设置六个页面 |
-| **可观测性** | 请求 Trace ID、执行步骤、SQL 展示、检索来源、组件健康检查 |
+| **可观测性** | 请求 Trace ID、规划步骤、工具耗时、SQL 展示、检索来源、组件健康检查 |
 
 ## 多 Agent 架构
 
@@ -26,15 +29,35 @@
 用户请求
    │
    ▼
-Supervisor Agent
-   ├── 问题补全（结合 session 历史）
-   ├── 意图路由
-   │      ├── RAG Agent ──► 混合检索 ──► Reranker ──► 引用校验
-   │      ├── SQL Agent ──► Schema ──► SQL ──► 只读执行 ──► 结论
-   │      └── Ticket Agent ──► 意图解析 ──► 工单读写 ──► 用户隔离
+问题补全（结合 session 历史）
+   │
    ▼
-统一返回：answer / tool_used / sources / data / trace_steps / trace_id
+任务规划器（Agentic Planner）
+   ├── 判断意图与信息是否充分
+   ├── 拆解 1—3 个可独立执行的步骤
+   └── 信息不足 ──► 先向用户澄清
+   │
+   ▼
+多工具执行
+   ├── RAG Agent ──► 混合检索 ──► Reranker ──► 页码引用
+   ├── SQL Agent ──► Schema ──► 只读 SQL ──► 自动纠错 ──► 结论
+   └── Ticket Agent ──► 意图解析 ──► 工单读写 ──► 用户隔离
+   │
+   ▼
+证据校验 Critic ──► 必要时自动修正 ──► 多步结果整合
+   │
+   ▼
+统一返回：answer / plan / steps / tools / sources / confidence / critic / follow_ups
 ```
+
+### 智能体现在哪里
+
+- **会规划**：不是“一次只选一个工具”，而是把复杂问题拆成 1—3 步，例如“病假材料 + 我的工单”会同时调用 RAG 与 Ticket。
+- **会澄清**：当问题缺少关键对象（如“帮我查一下”）时，先追问而不是猜测。
+- **会协作**：允许多个工具按顺序执行，最后把文档、数据和工单结果整合成一个回答。
+- **会校验**：文档类或多步回答会经过证据校验，检查数字、页码和结论是否有依据；不通过时自动修正。
+- **会表达不确定性**：返回 `confidence`、`critic.issues` 和 `follow_ups`，让用户知道答案的可信程度和下一步能问什么。
+- **会主动分析**：工作台的 AI 经营洞察会从真实统计中找变化、风险和行动建议，而不是只展示固定图表。
 
 RAG 处理链路：
 
@@ -74,6 +97,7 @@ Multi-Tool-Agent/
 ├── knowledge_base.py         # PDF 索引、Chroma 持久化、文档管理
 ├── hybrid_retriever.py       # BM25 + Vector + RRF + Reranker
 ├── analytics.py              # 业务分析聚合查询
+├── insights.py               # AI 经营洞察（统计事实 + LLM 解读 + 缓存）
 ├── database.py               # SQLite 访问、Schema、只读执行
 ├── sql_validator.py          # SQL 安全校验
 ├── conversation_memory.py    # 多轮会话记忆
@@ -206,6 +230,7 @@ docker run --rm -p 8000:8000 --env-file .env multi-tool-agent
 | POST | `/debug/route` | 查看意图路由结果 |
 | GET | `/api/health` | 组件健康状态 |
 | GET | `/api/dashboard` | 工作台聚合数据 |
+| GET | `/api/insights` | AI 经营洞察（`?refresh=true` 强制重新分析） |
 | GET | `/api/analytics/overview` | 销售额 / 订单 / 客单价 / 毛利 |
 | GET | `/api/analytics/trend` | 月度趋势 |
 | GET | `/api/analytics/categories` | 品类结构 |
@@ -237,10 +262,17 @@ docker run --rm -p 8000:8000 --env-file .env multi-tool-agent
 {
   "answer": "员工申请病假须提交... [第22页]",
   "tool_used": "rag",
+  "tools": ["rag"],
+  "plan": [{"tool": "rag", "question": "员工申请病假需要提供哪些材料？", "purpose": "检索病假材料规定"}],
+  "steps": [{"tool": "rag", "elapsed_ms": 7581, "error": ""}],
   "sources": [{"source": "京东集团员工手册.pdf", "page": 22, "content": "..."}],
   "pages": [22],
   "data": {},
-  "trace_steps": ["问题理解...", "Supervisor 选择：RAG 文档问答", "..."],
+  "confidence": 0.95,
+  "critic": {"supported": true, "confidence": 0.95, "issues": []},
+  "follow_ups": ["这项规定适用于哪些员工？", "能引用一下原文吗？"],
+  "clarification": false,
+  "trace_steps": ["问题理解...", "任务规划：rag...", "步骤 1/1：RAG 文档问答", "证据校验通过"],
   "trace_id": "a1b2c3d4",
   "session_id": "...",
   "success": true
@@ -290,6 +322,15 @@ Text-to-SQL 还会在 `data` 中返回 `sql`、`columns`、`rows`、`row_count`�
 | 数据查询（SQL） | 5 | 5 | 100% |
 | **综合** | **15** | **15** | **100%** |
 
+补充验证 Agentic 能力：
+
+| 场景 | 验证结果 |
+|---|---|
+| “员工病假需要什么材料？同时查询我的工单” | 规划 2 步，RAG 与 Ticket 均执行，回答整合两类结果 |
+| “帮我查一下” | 判断信息不足，主动澄清，不误调用工具 |
+| “对比本月和上月的销售额，并说明变化最大的品类” | 单步 SQL 完成跨月对比，并指出变化最大的品类 |
+| 工作台“AI 经营洞察” | 生成 4 条带发现、证据、建议和风险的洞察，二次请求命中缓存 |
+
 运行方式：
 
 ```bash
@@ -310,7 +351,8 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-覆盖 SQL 安全校验、数据库 Schema / 聚合、只读执行、工单隔离与状态流转，共 23 项。
+覆盖 SQL 安全校验、数据库 Schema / 聚合、只读执行、工单隔离、状态流转、
+规划 JSON 解析、来源去重与 AI 洞察兜底，共 31 项。
 
 ## 常见问题
 

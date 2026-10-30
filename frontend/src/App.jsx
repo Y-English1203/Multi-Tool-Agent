@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import AgentPanel from "./components/AgentPanel";
 import ChatPage from "./pages/ChatPage";
@@ -137,7 +137,7 @@ export default function App() {
         const data = await api.health();
         if (alive) setHealth(data);
       } catch {
-        if (alive) setHealth({ status: "offline", version: "2.0.0", components: {} });
+        if (alive) setHealth({ status: "offline", version: "2.1.0", components: {} });
       }
     }
     loadHealth();

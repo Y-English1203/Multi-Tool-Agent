@@ -52,6 +52,7 @@ from conversation_memory import (
     save_message,
 )
 from hybrid_retriever import HybridRetriever
+from insights import generate_insights
 from knowledge_base import KnowledgeBase
 from text2sql import ask_database
 from ticket_tools import (
@@ -87,7 +88,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("multi_tool_agent")
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 STARTED_AT = time.time()
 
 
@@ -330,6 +331,12 @@ def dashboard():
     data["tickets"] = ticket_stats()
     data["memory"] = conversation_stats()
     return data
+
+
+@app.get("/api/insights")
+def insights(refresh: bool = Query(default=False)):
+    """AI 经营洞察：模型只解读统计事实，结果缓存 10 分钟。"""
+    return generate_insights(force=refresh)
 
 
 @app.get("/api/analytics/overview")
@@ -678,16 +685,25 @@ def ask_supervisor(q: Question, request: Request):
             "user_id": user_id,
             "trace_id": trace_id,
             "history": history,
+            "intent": "",
+            "plan": [],
+            "plan_reason": "",
             "next_tool": "",
-            "intent_reason": "",
+            "tools": [],
+            "step_results": [],
             "answer": "",
             "tool_used": "",
             "data": {},
+            "sources": [],
             "error": "",
+            "needs_clarification": False,
+            "clarification_question": "",
+            "confidence": 0.0,
+            "critic": {},
+            "follow_ups": [],
             "retry_count": 0,
             "max_retries": 2,
             "retriever": request.app.state.retriever,
-            "sources": [],
             "trace_steps": [],
         }
 
@@ -722,11 +738,20 @@ def ask_supervisor(q: Question, request: Request):
         return {
             "answer": answer,
             "tool_used": result.get("tool_used", ""),
+            "tools": result.get("tools", []),
             "sources": sources,
             "pages": pages,
             "data": result.get("data", {}) or {},
+            "plan": result.get("plan", []),
+            "steps": result.get("step_results", []),
+            "plan_reason": result.get("plan_reason", ""),
+            "intent": result.get("intent", ""),
+            "confidence": result.get("confidence", 0.0),
+            "critic": result.get("critic", {}) or {},
+            "follow_ups": result.get("follow_ups", []),
+            "clarification": bool(result.get("needs_clarification")),
             "trace_steps": result.get("trace_steps", []),
-            "intent_reason": result.get("intent_reason", ""),
+            "intent_reason": result.get("plan_reason", ""),
             "trace_id": result.get("trace_id", trace_id),
             "session_id": session_id,
             "user_id": user_id,
@@ -779,16 +804,25 @@ def debug_route(q: Question, request: Request):
         "user_id": _clean_user(q.user_id),
         "history": get_history(_clean_user(q.user_id), q.session_id or "debug"),
         "trace_id": trace_id,
+        "intent": "",
+        "plan": [],
+        "plan_reason": "",
         "next_tool": "",
-        "intent_reason": "",
+        "tools": [],
+        "step_results": [],
         "answer": "",
         "tool_used": "",
         "data": {},
+        "sources": [],
         "error": "",
+        "needs_clarification": False,
+        "clarification_question": "",
+        "confidence": 0.0,
+        "critic": {},
+        "follow_ups": [],
         "retry_count": 0,
         "max_retries": 0,
         "retriever": request.app.state.retriever,
-        "sources": [],
         "trace_steps": [],
     }
     result = supervisor_agent.invoke(initial_state)
@@ -796,7 +830,10 @@ def debug_route(q: Question, request: Request):
         "question": q.question,
         "resolved_question": result.get("resolved_question"),
         "selected_tool": result.get("next_tool"),
-        "intent_reason": result.get("intent_reason"),
+        "tools": result.get("tools", []),
+        "plan": result.get("plan", []),
+        "intent": result.get("intent", ""),
+        "intent_reason": result.get("plan_reason"),
         "trace_id": trace_id,
     }
 

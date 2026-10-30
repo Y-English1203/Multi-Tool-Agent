@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
+  ArrowRight,
   ArrowUpRight,
   Bot,
+  Brain,
   Check,
   Clock,
   Copy,
   Database,
   FileText,
+  ListChecks,
   Menu,
   RotateCcw,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
   Ticket,
@@ -55,6 +59,7 @@ const CHIPS = [
   "上个月订单量是多少？",
   "本月各品类销售情况",
   "帮我创建一个工单：VPN 无法连接",
+  "查一下本月销售额和我的工单",
 ];
 
 const TOOL_STYLES = {
@@ -172,9 +177,179 @@ function TicketResult({ data }) {
   );
 }
 
-function MessageBubble({ message, onRetry }) {
+function PlanPanel({ plan, steps }) {
+  if (!plan?.length) return null;
+
+  return (
+    <details
+      open={plan.length > 1}
+      className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2.5"
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-semibold text-indigo-700">
+        <ListChecks size={13} />
+        智能规划 · {plan.length} 步
+        <span className="ml-auto text-[10px] font-normal text-indigo-400">
+          {plan.length > 1 ? "多工具协作" : "单工具"}
+        </span>
+      </summary>
+      <div className="mt-2 space-y-1.5">
+        {plan.map((step, index) => {
+          const result = steps?.[index];
+          const status = !result
+            ? "待执行"
+            : result.error
+              ? "异常"
+              : `完成 · ${result.elapsed_ms}ms`;
+          return (
+            <div key={`${step.tool}-${index}`} className="flex items-start gap-2">
+              <span
+                className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[9px] font-bold ${
+                  result && !result.error
+                    ? "bg-emerald-100 text-emerald-700"
+                    : result?.error
+                      ? "bg-rose-100 text-rose-600"
+                      : "bg-white text-slate-400"
+                }`}
+              >
+                {index + 1}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-medium text-slate-700">
+                  {toolLabel(step.tool)} · {step.purpose}
+                </p>
+                <p className="mt-0.5 truncate text-[10px] text-slate-400">
+                  {step.question}
+                </p>
+              </div>
+              <span className="shrink-0 text-[9px] text-slate-400">{status}</span>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function CriticPanel({ critic, confidence, clarification }) {
+  if (clarification) {
+    return (
+      <div className="mt-3 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+        <Brain size={14} />
+        当前信息不足，Agent 先向你确认，而不是猜测答案。
+      </div>
+    );
+  }
+
+  if (!critic || critic.supported === undefined || confidence === null) return null;
+
+  const passed = critic.supported && Number(confidence) >= 0.7;
+  return (
+    <div
+      className={`mt-3 rounded-xl border px-3 py-2 text-[11px] ${
+        passed
+          ? "border-emerald-100 bg-emerald-50/60 text-emerald-700"
+          : "border-amber-200 bg-amber-50 text-amber-800"
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <ShieldCheck size={13} />
+        <span className="font-semibold">
+          {passed ? "证据校验通过" : "证据校验发现风险"}
+        </span>
+        <span className="text-[10px] opacity-70">
+          置信度 {(Number(confidence) * 100).toFixed(0)}%
+        </span>
+        {critic.revised && <span className="text-[10px] opacity-70">已自动修正</span>}
+      </div>
+      {critic.issues?.length > 0 && (
+        <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-[10px] leading-5">
+          {critic.issues.slice(0, 3).map((issue, index) => (
+            <li key={index}>{issue}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function StepResults({ steps }) {
+  if (!steps || steps.length < 2) return null;
+
+  return (
+    <details className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2.5">
+      <summary className="cursor-pointer text-[11px] font-semibold text-slate-600">
+        分步结果（{steps.length} 步）
+      </summary>
+      <div className="mt-3 space-y-3">
+        {steps.map((step, index) => (
+          <div key={`${step.tool}-${index}`} className="rounded-lg border border-slate-200 bg-white p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-bold text-slate-400">0{index + 1}</span>
+              <span className="text-[11px] font-semibold text-slate-700">
+                {toolLabel(step.tool)}
+              </span>
+              <span className="text-[10px] text-slate-400">{step.question}</span>
+              <span className="ml-auto text-[9px] text-slate-400">
+                {step.error ? "异常" : `${step.elapsed_ms}ms`}
+              </span>
+            </div>
+            {step.error ? (
+              <p className="mt-2 text-[10px] text-rose-600">{step.error}</p>
+            ) : (
+              <>
+                <p className="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-slate-600">
+                  {step.answer}
+                </p>
+                {step.data?.columns?.length > 0 && (
+                  <div className="mt-2">
+                    <DataTable
+                      columns={step.data.columns}
+                      rows={step.data.rows || []}
+                      maxHeight="220px"
+                      footer={false}
+                    />
+                  </div>
+                )}
+                {step.data?.ticket && (
+                  <TicketResult data={{ ticket: step.data.ticket }} />
+                )}
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function FollowUps({ items, onFollowUp }) {
+  if (!items?.length || !onFollowUp) return null;
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <span className="text-[10px] text-slate-400">继续追问：</span>
+      {items.slice(0, 3).map((item) => (
+        <button
+          key={item}
+          onClick={() => onFollowUp(item)}
+          className="inline-flex items-center gap-1 rounded-full border border-indigo-100 bg-indigo-50/60 px-2.5 py-1 text-[10px] text-indigo-600 transition hover:border-indigo-300 hover:bg-indigo-50"
+        >
+          {item}
+          <ArrowRight size={10} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MessageBubble({ message, onRetry, onFollowUp }) {
   const isUser = message.role === "user";
   const tool = normalizeTool(message.tool_used);
+  const tools = Array.isArray(message.tools) && message.tools.length
+    ? Array.from(new Set(message.tools))
+    : tool
+      ? [tool]
+      : [];
   const [copied, setCopied] = useState(false);
 
   async function copyAnswer() {
@@ -210,14 +385,33 @@ function MessageBubble({ message, onRetry }) {
       <article className="min-w-0 max-w-[92%] flex-1 rounded-2xl rounded-tl-sm border border-indigo-100/80 bg-white px-4 py-4 shadow-sm md:max-w-[84%]">
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-xs font-semibold text-slate-700">Multi-Tool Agent</p>
-          {tool && (
+          {tools.map((item) => (
             <span
+              key={item}
               className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
-                TOOL_STYLES[tool] || "border-slate-200 bg-slate-50 text-slate-500"
+                TOOL_STYLES[item] || "border-slate-200 bg-slate-50 text-slate-500"
               }`}
             >
               <Wrench size={10} />
-              {toolLabel(tool)}
+              {toolLabel(item)}
+            </span>
+          ))}
+          {tools.length > 1 && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+              <Brain size={10} />
+              多工具协作
+            </span>
+          )}
+          {message.confidence !== null && message.confidence !== undefined && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                Number(message.confidence) >= 0.7
+                  ? "bg-emerald-50 text-emerald-700"
+                  : "bg-amber-50 text-amber-700"
+              }`}
+            >
+              <ShieldCheck size={10} />
+              {(Number(message.confidence) * 100).toFixed(0)}%
             </span>
           )}
           {message.time && (
@@ -235,17 +429,27 @@ function MessageBubble({ message, onRetry }) {
           </button>
         </div>
 
+        <PlanPanel plan={message.plan} steps={message.steps} />
+
         <div className="mt-3">
           <Markdown text={message.text || ""} />
         </div>
 
+        <CriticPanel
+          critic={message.critic}
+          confidence={message.confidence}
+          clarification={message.clarification}
+        />
+
         {message.intent_reason && (
-          <p className="mt-3 text-[10px] text-slate-400">路由依据：{message.intent_reason}</p>
+          <p className="mt-3 text-[10px] text-slate-400">规划依据：{message.intent_reason}</p>
         )}
 
         <SourceList sources={message.sources} />
         <SqlResult data={message.data} />
         <TicketResult data={message.data} />
+        <StepResults steps={message.steps} />
+        <FollowUps items={message.follow_ups} onFollowUp={onFollowUp} />
 
         {message.trace_steps?.length > 0 && (
           <details className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
@@ -366,8 +570,16 @@ export default function ChatPage({
         pages: data.pages || [],
         trace_steps: data.trace_steps || [],
         tool_used: data.tool_used || "",
+        tools: data.tools || [],
         data: data.data || {},
-        intent_reason: data.intent_reason || "",
+        plan: data.plan || [],
+        steps: data.steps || [],
+        plan_reason: data.plan_reason || "",
+        confidence: data.confidence ?? null,
+        critic: data.critic || {},
+        follow_ups: data.follow_ups || [],
+        clarification: Boolean(data.clarification),
+        intent_reason: data.intent_reason || data.plan_reason || "",
         error: data.success === false ? data.error || "本次请求未能成功完成。" : null,
       };
 
@@ -455,7 +667,7 @@ export default function ChatPage({
                 : "智能问答"}
             </h2>
             <p className="mt-0.5 truncate text-[11px] text-slate-400">
-              Supervisor 统一调度 · RAG · Text-to-SQL · Ticket
+              Agentic Supervisor · 任务规划 · 多工具协作 · 证据校验
             </p>
           </div>
         </div>
@@ -463,7 +675,7 @@ export default function ChatPage({
         <div className="flex shrink-0 items-center gap-2">
           <div className="hidden items-center gap-1.5 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1.5 text-[11px] text-emerald-700 sm:flex">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-            多智能体在线
+            Agentic 多步规划在线
             {health?.components?.knowledge?.documents ? (
               <span className="text-emerald-500">
                 · {health.components.knowledge.documents} 篇文档
@@ -490,14 +702,14 @@ export default function ChatPage({
               <Sparkles size={27} />
             </div>
             <p className="mb-2 text-xs font-semibold tracking-[0.18em] text-indigo-600">
-              MULTI-TOOL AI ASSISTANT
+              AGENTIC MULTI-TOOL ASSISTANT
             </p>
             <h3 className="text-2xl font-bold tracking-tight text-slate-900 md:text-3xl">
               你好，今天想了解什么？
             </h3>
             <p className="mt-3 max-w-xl text-sm leading-7 text-slate-500">
-              我会先判断你的意图，再调用文档检索、业务数据查询或工单服务。
-              回答中的页码来自真实检索结果，数据结论来自数据库查询。
+              我会先规划任务，再按需要组合文档检索、业务数据查询和工单服务。
+              回答会经过证据校验，并给出置信度、来源和下一步建议。
             </p>
 
             <div className="mt-8 grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -541,7 +753,12 @@ export default function ChatPage({
         ) : (
           <div className="mx-auto max-w-3xl space-y-6">
             {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} onRetry={retry} />
+              <MessageBubble
+                key={message.id}
+                message={message}
+                onRetry={retry}
+                onFollowUp={send}
+              />
             ))}
 
             {sending && (

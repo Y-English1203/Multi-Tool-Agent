@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+﻿import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   BookOpen,
@@ -134,7 +134,7 @@ export default function SettingsPage({
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
             label="服务版本"
-            value={health?.version || "2.0.0"}
+            value={health?.version || "2.1.0"}
             hint={`运行 ${Math.round((health?.uptime_seconds || 0) / 60)} 分钟`}
             icon={Server}
             tone="indigo"

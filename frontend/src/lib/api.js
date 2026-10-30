@@ -63,6 +63,8 @@ export const api = {
   health: () => request("/api/health"),
 
   dashboard: () => request("/api/dashboard"),
+  insights: (refresh = false) =>
+    request(`/api/insights${buildQuery({ refresh })}`),
   overview: (params) => request(`/api/analytics/overview${buildQuery(params)}`),
   trend: (params) => request(`/api/analytics/trend${buildQuery(params)}`),
   categories: (params) => request(`/api/analytics/categories${buildQuery(params)}`),

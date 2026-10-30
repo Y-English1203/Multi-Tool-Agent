@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   BookOpen,
+  Brain,
   CheckCircle2,
   Circle,
   Database,
@@ -9,7 +10,7 @@ import {
   Ticket,
   Workflow,
 } from "lucide-react";
-import { normalizeTool } from "../lib/format";
+import { normalizeTool, toolLabel } from "../lib/format";
 
 const AGENTS = [
   {
@@ -44,14 +45,23 @@ export default function AgentPanel({
     .reverse()
     .find((message) => message.role === "assistant");
   const traceSteps = lastAssistant?.trace_steps || [];
+  const plan = lastAssistant?.plan || [];
+  const confidence = lastAssistant?.confidence;
+  const stepResults = lastAssistant?.steps || [];
+  const usedTools =
+    lastAssistant?.tools?.length > 0
+      ? lastAssistant.tools
+      : activeTool
+        ? [activeTool]
+        : [];
 
   function getStatus(key) {
     if (sending) {
-      if (key === "supervisor" || key === activeTool) return "running";
+      if (key === "supervisor" || usedTools.includes(key)) return "running";
       return "waiting";
     }
     if (requestStatus === "success") {
-      if (key === "supervisor" || key === activeTool) return "done";
+      if (key === "supervisor" || usedTools.includes(key)) return "done";
     }
     if (requestStatus === "error" && key === "supervisor") return "error";
     return "waiting";
@@ -70,11 +80,55 @@ export default function AgentPanel({
           </span>
         </div>
         <p className="mt-2 text-[11px] leading-5 text-slate-500">
-          展示本次请求实际使用的模块与执行步骤，不代表内部实时调用链。
+          展示本次任务的规划、工具调用与证据校验结果。
         </p>
       </div>
 
       <div className="flex-1 p-4">
+        {plan.length > 0 && (
+          <div className="mb-4 rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="flex items-center gap-1.5 text-[11px] font-semibold text-indigo-700">
+                <Brain size={13} />
+                本次任务规划
+              </h3>
+              {confidence !== null && confidence !== undefined && (
+                <span className="rounded-full bg-white px-2 py-0.5 text-[9px] font-medium text-indigo-600">
+                  置信度 {(Number(confidence) * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {plan.map((step, index) => {
+                const result = stepResults[index];
+                return (
+                  <div key={`${step.tool}-${index}`} className="flex items-start gap-2 text-[10px]">
+                    <span
+                      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded text-[8px] font-bold ${
+                        result && !result.error
+                          ? "bg-emerald-100 text-emerald-700"
+                          : result?.error
+                            ? "bg-rose-100 text-rose-600"
+                            : "bg-white text-slate-400"
+                      }`}
+                    >
+                      {index + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-slate-700">
+                        {toolLabel(step.tool)}
+                      </p>
+                      <p className="truncate text-[9px] text-slate-400">
+                        {step.purpose}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-xs font-semibold text-slate-700">Agent 模块</h3>
           <span className="text-[10px] text-slate-400">4 个组件</span>

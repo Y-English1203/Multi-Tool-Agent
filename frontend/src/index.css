@@ -88,7 +88,15 @@ select:focus-visible {
 .prose-chat ul,
 .prose-chat ol {
   margin: 0.35rem 0 0.7rem;
-  padding-left: 1.15rem;
+  padding-left: 1.25rem;
+}
+
+.prose-chat ul {
+  list-style: disc;
+}
+
+.prose-chat ol {
+  list-style: decimal;
 }
 
 .prose-chat li {
